@@ -6,6 +6,11 @@ A 16-step drum machine for the Commodore 64.
 This is an old project I started years ago and never finished.  
 Recently I dusted it off, fixed the issues, and brought it back to a working state.
 
+## Downloads
+
+Get the latest builds here:  
+https://github.com/sandlbn/drumbox64/releases/
+
 ## Features
 - 7 tracks: Kick, Snare, Closed Hat, Open Hat, Tom, Clap, Crash
 - 16 steps per track with 4 velocity levels (off / soft / medium / loud)
