@@ -27,8 +27,7 @@ int main(void)
     uint8_t key;
     uint8_t last_step;
 
-    /* Kill CIA2 again with inline asm - belt and suspenders.
-     * NOTE: fixed bug - explicit lda #$08 for CRB, not value from ICR read */
+    /* Kill CIA2 again with inline asm - belt and suspenders. */
     __asm {
         lda #$5e
         sta $0318
@@ -44,7 +43,6 @@ int main(void)
     }
 
     /* Force VIC-II into correct state IMMEDIATELY.
-     * Do this before any C function calls, using direct writes.
      * $D011 = $1B: screen on, 25 rows, text mode, no scroll
      * $D016 = $08: 40 cols, no multicolor
      * $D018 = $15: screen RAM $0400, charset ROM $D000

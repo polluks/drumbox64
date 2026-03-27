@@ -96,43 +96,44 @@ static const uint8_t V_NUM[6] = { 0, 1, 2, 0, 1, 2 };
 typedef struct {
     uint16_t fstart;
     uint16_t fend;
-    uint8_t  wave;
+    uint8_t  wave;     /* initial waveform */
     uint8_t  ad;
     uint8_t  sr;
     uint8_t  sweep;
     uint8_t  ttl;
+    uint8_t  wave2;      /* switch to this waveform after wave2_tick (0=no switch) */
+    uint8_t  wave2_tick; /* tick count at which to switch */
 } KV;
 
 static const KV KITS[NUM_KITS][NUM_TRACKS] = {
 /* ── KIT_909: punchy electronic ─────────────────────────────────── */
 {
-/*kick */ {12000,  120, TRI,   0x03, 0x09, 55, 14},
-/*snare*/ { 8000, 8000, NOISE, 0x02, 0x08,  0,  8},
-/*chh  */ {30000,30000, NOISE, 0x01, 0x02,  0,  3},
-/*ohh  */ {30000,30000, NOISE, 0x01, 0x08,  0, 10},
-/*tom  */ { 7000, 1000, TRI,   0x02, 0x08, 30, 11},
-/*clap */ {22000,22000, NOISE, 0x01, 0x05,  0,  5},
-/*crash*/ {28000,28000, NOISE, 0x01, 0x0C,  0, 22},
+/*kick */ {12000,  120, TRI,   0x03, 0x09, 55, 14,  0, 0},
+/*snare*/ { 8000, 8000, NOISE, 0x02, 0x08,  0,  8,  0, 0},
+/*chh  */ {30000,30000, NOISE, 0x01, 0x02,  0,  3,  0, 0},
+/*ohh  */ {30000,30000, NOISE, 0x01, 0x08,  0, 10,  0, 0},
+/*tom  */ { 7000, 1000, TRI,   0x02, 0x08, 30, 11,  0, 0},
+/*clap */ {22000,22000, NOISE, 0x01, 0x05,  0,  5,  0, 0},
+/*crash*/ {28000,28000, NOISE, 0x01, 0x0C,  0, 22,  0, 0},
 },
 /* ── KIT_808: deep boomy ─────────────────────────────────────────── */
 {
-/*kick */ { 4800,   50, TRI,   0x02, 0x0B, 18, 24},
-/*snare*/ { 5000, 5000, NOISE, 0x02, 0x0A,  0, 14},
-/*chh  */ {28000,28000, NOISE, 0x01, 0x01,  0,  2},
-/*ohh  */ {28000,28000, NOISE, 0x01, 0x0B,  0, 15},
-/*tom  */ { 4200,  600, TRI,   0x02, 0x09, 16, 16},
-/*clap */ {16000,16000, NOISE, 0x01, 0x07,  0,  8},
-/*crash*/ {26000,26000, NOISE, 0x01, 0x0E,  0, 30},
+/*kick */ { 4800,   50, TRI,   0x02, 0x0B, 18, 24,  0, 0},
+/*snare*/ { 5000, 5000, NOISE, 0x02, 0x0A,  0, 14,  0, 0},
+/*chh  */ {28000,28000, NOISE, 0x01, 0x01,  0,  2,  0, 0},
+/*ohh  */ {28000,28000, NOISE, 0x01, 0x0B,  0, 15,  0, 0},
+/*tom  */ { 4200,  600, TRI,   0x02, 0x09, 16, 16,  0, 0},
+/*clap */ {16000,16000, NOISE, 0x01, 0x07,  0,  8,  0, 0},
+/*crash*/ {26000,26000, NOISE, 0x01, 0x0E,  0, 30,  0, 0},
 },
-/* ── KIT_ROCK: warm live feel ────────────────────────────────────── */
 {
-/*kick */ { 9500,  200, TRI,   0x03, 0x09, 40, 16},
-/*snare*/ { 9000, 9000, NOISE, 0x02, 0x08,  0, 11},
-/*chh  */ {32000,32000, NOISE, 0x01, 0x03,  0,  4},
-/*ohh  */ {32000,32000, NOISE, 0x01, 0x07,  0, 12},
-/*tom  */ { 6000,  900, TRI,   0x02, 0x08, 26, 14},
-/*clap */ {19000,19000, NOISE, 0x01, 0x06,  0,  7},
-/*crash*/ {27000,27000, NOISE, 0x02, 0x0D,  0, 26},
+/*kick */ {14000,  180, NOISE, 0x01, 0x09, 70, 18,  PULSE|GATE, 2},
+/*snare*/ {18000,18000, NOISE, 0x01, 0x06,  0, 10,  PULSE|GATE, 2},
+/*chh  */ {22000,22000, NOISE, 0x01, 0x02,  0,  3,  0,          0},
+/*ohh  */ {22000,22000, NOISE, 0x01, 0x09,  0, 12,  0,          0},
+/*tom  */ { 5500,  600, SAW,   0x02, 0x08, 22, 14,  0,          0},
+/*clap */ {20000,20000, NOISE, 0x01, 0x04,  0,  6,  0,          0},
+/*crash*/ {18000,18000, NOISE, 0x02, 0x0E,  0, 35,  0,          0},
 },
 };
 
@@ -174,47 +175,64 @@ void sid_init(void)
 }
 
 /* ── sid_trigger ─────────────────────────────────────────────────── */
-void sid_trigger(uint8_t track, uint8_t kit)
+/*
+ * vel = 0 (silent, should not be called)
+ *       1 = soft   (volume 7/15)
+ *       2 = medium (volume 11/15)
+ *       3 = loud   (volume 15/15, full)
+ *
+ */
+static const uint8_t VEL_VOL[4] = { 0x0F, 0x06, 0x0B, 0x0F };
+
+void sid_trigger(uint8_t track, uint8_t vel, uint8_t kit)
 {
     uint8_t vi, sid, vn;
     const KV *k;
+    uint8_t vol;
 
     if (track >= NUM_TRACKS) return;
+    if (vel == 0) return;
+    if (vel > 3) vel = 3;
+
     vi = T2V[track];
-
     if (vi >= 3) {
-        if (!g_dual_sid) vi -= 3;   /* fold onto SID1 */
+        if (!g_dual_sid) vi -= 3;
     }
-
     sid = V_SID[vi];
     vn  = V_NUM[vi];
-
     if (sid == 1 && !g_dual_sid) return;
 
-    k = &KITS[kit][track];
+    k   = &KITS[kit][track];
+    vol = VEL_VOL[vel];
 
-    /* Reset voice: waveform with no gate clears the envelope generator */
-    vw(sid, vn, SID_CTRL, k->wave);
+    /* Set master volume for this SID to match velocity */
+    if (sid == 0) SID1[SID_VOL_FLT] = (SID1[SID_VOL_FLT] & 0xF0) | vol;
+    else          SID2[SID_VOL_FLT] = (SID2[SID_VOL_FLT] & 0xF0) | vol;
 
-    /* Set start frequency */
+    /* Set pulse width to square ($0800) for PULSE waveform sounds.
+     * This gives the richest pulse body for kick/snare. */
+    if ((k->wave & PULSE) || (k->wave2 & PULSE)) {
+        vw(sid, vn, SID_PW_LO, 0x00);
+        vw(sid, vn, SID_PW_HI, 0x08);  /* 50% duty cycle = square wave */
+    }
+
+    vw(sid, vn, SID_CTRL, k->wave & ~GATE);  /* waveform, gate off first */
     vw(sid, vn, SID_FREQ_LO, (uint8_t)(k->fstart & 0xFF));
     vw(sid, vn, SID_FREQ_HI, (uint8_t)(k->fstart >> 8));
-
-    /* Set envelope */
     vw(sid, vn, SID_AD, k->ad);
     vw(sid, vn, SID_SR, k->sr);
-
-    /* Gate on */
-    vw(sid, vn, SID_CTRL, k->wave | GATE);
+    vw(sid, vn, SID_CTRL, k->wave | GATE);   /* gate on */
 
     /* Record sweep state */
-    g_voices[vi].sid    = sid;
-    g_voices[vi].voice  = vn;
-    g_voices[vi].freq   = k->fstart;
-    g_voices[vi].freq_end = k->fend;
-    g_voices[vi].sweep  = k->sweep;
-    g_voices[vi].ttl    = k->ttl;
-    g_voices[vi].active = 1;
+    g_voices[vi].sid       = sid;
+    g_voices[vi].voice     = vn;
+    g_voices[vi].freq      = k->fstart;
+    g_voices[vi].freq_end  = k->fend;
+    g_voices[vi].sweep     = k->sweep;
+    g_voices[vi].ttl       = k->ttl;
+    g_voices[vi].active    = 1;
+    g_voices[vi].wave2      = k->wave2;
+    g_voices[vi].wave2_tick = k->wave2_tick;
 }
 
 /* ── sid_update_sweeps (called from seq_work ISR) ────────────────── */
@@ -234,11 +252,23 @@ void sid_update_sweeps(void)
         /* Safety guard */
         if (sid == 1 && !g_dual_sid) { v->active = 0; continue; }
 
+        /* Waveform switch: Hubbard noise-then-pitched technique.
+         * At wave2_tick, swap waveform from initial (noise) to wave2 (pulse).
+         * This creates the "stick crack + body resonance" effect. */
+        if (v->wave2 && v->wave2_tick > 0) {
+            v->wave2_tick--;
+            if (v->wave2_tick == 0) {
+                /* Switch waveform now - keep gate on */
+                vw(sid, vn, SID_CTRL, v->wave2);
+                v->wave2 = 0;   /* done switching */
+            }
+        }
+
         /* Count down gate duration */
         if (v->ttl > 0) {
             v->ttl--;
             if (v->ttl == 0) {
-                /* Gate off: clear bit 0 of control register */
+                /* Gate off: clear gate bit */
                 r   = (uint8_t)(vn * 7u + SID_CTRL);
                 cur = sid_read(sid, r);
                 sid_write(sid, r, cur & 0xFE);

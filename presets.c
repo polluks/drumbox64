@@ -1,4 +1,4 @@
-/* *
+/*
  * Each preset is a Pattern struct containing:
  *   - steps[NUM_TRACKS][NUM_STEPS]: 16-step grid for each of 7 tracks
  *   - name[16]: display name
@@ -500,9 +500,6 @@ const Pattern g_presets[MAX_PRESETS] = {
 /* ── 28: Drum & Bass ─────────────────────────────────────── */
 /*
  * Classic DnB Amen-style pattern at 170 BPM.
- * Kick on 1 and the "and" of 2, snare on 2 and 4.
- * Busy hi-hat pattern with open hats for that rolling feel.
- * 909 kit gives the punchy electronic character DnB needs.
  */
 {
   .steps = {
@@ -521,8 +518,6 @@ const Pattern g_presets[MAX_PRESETS] = {
 
 /* ── 29: Jungle / Breakbeat ──────────────────────────────── */
 /*
- * Jungle breakbeat pattern at 160 BPM.
- * Syncopated kick, off-beat snares, dense hi-hat rolling.
  * Inspired by early Goldie/LTJ Bukem era jungle.
  */
 {
@@ -540,9 +535,73 @@ const Pattern g_presets[MAX_PRESETS] = {
   .tempo = 160,
 },
 
+/* ── 30: Metal - Thrash ──────────────────────────────────────────── */
+/*
+ * Classic thrash metal at 240 BPM.
+ */
+{
+  .steps = {
+    /* kick  */ {1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1},
+    /* snare */ {0,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0},
+    /* chh   */ {1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1},
+    /* ohh   */ {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0},
+    /* tom   */ {0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,1,0},
+    /* clap  */ {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0},
+    /* crash */ {1,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0},
+  },
+  .name = "Metal - Thrash  ",
+  .kit  = KIT_ROCK,
+  .tempo = 240,
+},
+
+/* ── 31: Metal - Blast Beat ──────────────────────────────────────── */
+/*
+ * Blast beat at 260 BPM - the signature sound of death/black metal.
+ */
+{
+  .steps = {
+    /* kick  */ {1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0},
+    /* snare */ {0,1,0,1, 0,1,0,1, 0,1,0,1, 0,1,0,1},
+    /* chh   */ {1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1},
+    /* ohh   */ {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0},
+    /* tom   */ {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0},
+    /* clap  */ {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0},
+    /* crash */ {1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0},
+  },
+  .name = "Metal-Blast Beat",
+  .kit  = KIT_ROCK,
+  .tempo = 300,
+},
+
+/* ── 32-35: Empty slots for custom patterns ──────────────────────── */
+{
+  .steps = {{0},{0},{0},{0},{0},{0},{0}},
+  .name = "-- Empty 1 --   ",
+  .kit  = KIT_909,
+  .tempo = 120,
+},
+{
+  .steps = {{0},{0},{0},{0},{0},{0},{0}},
+  .name = "-- Empty 2 --   ",
+  .kit  = KIT_909,
+  .tempo = 120,
+},
+{
+  .steps = {{0},{0},{0},{0},{0},{0},{0}},
+  .name = "-- Empty 3 --   ",
+  .kit  = KIT_909,
+  .tempo = 120,
+},
+{
+  .steps = {{0},{0},{0},{0},{0},{0},{0}},
+  .name = "-- Empty 4 --   ",
+  .kit  = KIT_909,
+  .tempo = 120,
+},
+
 };
 
-const uint8_t g_num_presets = 30;
+const uint8_t g_num_presets = 36;
 
 /* Load a preset into the working pattern */
 void preset_load(uint8_t index)
@@ -557,7 +616,8 @@ void preset_load(uint8_t index)
     /* Copy steps */
     for (t = 0; t < NUM_TRACKS; t++)
         for (s = 0; s < NUM_STEPS; s++)
-            g_pattern.steps[t][s] = p->steps[t][s];
+            /* Map preset 0/1 values to velocity: 0=off, 1->3=loud */
+            g_pattern.steps[t][s] = p->steps[t][s] ? 3 : 0;
 
     /* Copy metadata */
     for (t = 0; t < 16; t++)

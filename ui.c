@@ -29,6 +29,14 @@ static void snum(uint8_t row, uint8_t col, uint8_t v, uint8_t color)
     sput(row, col + 2, (uint8_t)('0' + v % 10), color);
 }
 
+/* Print 3-digit decimal for uint16_t (e.g. BPM up to 280) */
+static void snum16(uint8_t row, uint8_t col, uint16_t v, uint8_t color)
+{
+    sput(row, col,     (v >= 100) ? (uint8_t)('0' + (v / 100) % 10) : (uint8_t)' ', color);
+    sput(row, col + 1, (uint8_t)('0' + (v % 100) / 10), color);
+    sput(row, col + 2, (uint8_t)('0' + v % 10), color);
+}
+
 /* Print 2-digit decimal with leading zero */
 static void snum2(uint8_t row, uint8_t col, uint8_t v, uint8_t color)
 {
@@ -43,6 +51,25 @@ static void snum2(uint8_t row, uint8_t col, uint8_t v, uint8_t color)
 #define CYL  7   /* yellow     */
 #define CDG 11   /* dark gray  */
 #define CLB 14   /* light blue */
+
+/* ASCII to C64 screen code conversion */
+static uint8_t a2s(uint8_t c)
+{
+    if (c >= 'A' && c <= 'Z') return (uint8_t)(c - 64u);
+    if (c >= 'a' && c <= 'z') return (uint8_t)(c - 96u);
+    if (c == '|') return 0x5Du;
+    if (c == '[') return 0x1Bu;
+    if (c == ']') return 0x1Du;
+    if (c == '@') return 0u;
+    return c;
+}
+
+/* Write string with screen code conversion */
+static void sputs(uint8_t row, uint8_t col, const char *s, uint8_t color)
+{
+    while (*s && col < 40u)
+        sput(row, col++, a2s((uint8_t)*s++), color);
+}
 
 /* ── Labels ──────────────────────────────────────────────────────── */
 static const char * const TLAB[NUM_TRACKS] = {
@@ -77,20 +104,14 @@ uint8_t ui_read_key(void)
 
 /* ── Joystick (port 2, $DC00) ────────────────────────────────────── */
 /*
- * C64 joystick port 2 is read from CIA1 Port A ($DC00).
- * Bits are ACTIVE LOW: 0 = pressed, 1 = not pressed.
- *   bit 0 = UP     bit 1 = DOWN
- *   bit 2 = LEFT   bit 3 = RIGHT   bit 4 = FIRE
+ * Edit mode: hold fire for EDIT_HOLD polls to enter.
+ * In edit mode:
+ *   JOY LEFT/RIGHT = swing ±4
+ *   JOY UP/DOWN    = velocity of current step ±1
+ *   FIRE (new press) = exit edit mode
+ *   Auto-exit after EDIT_TIMEOUT polls of no input
  *
- * We do edge detection (act on press, not hold) plus autorepeat:
- *   - First press: act immediately
- *   - Hold 20 polls: begin repeat every 6 polls
- * This matches typical C64 cursor key feel.
- *
- * Joystick maps to:
- *   UP/DOWN  -> move between tracks
- *   LEFT/RIGHT -> move between steps
- *   FIRE     -> toggle current step
+ * Normal mode: short fire press = cycle velocity as before.
  */
 #define JOY2  (*(volatile uint8_t *)0xDC00)
 
@@ -100,116 +121,281 @@ uint8_t ui_read_key(void)
 #define JOY_RIGHT 0x08
 #define JOY_FIRE  0x10
 
-/* Autorepeat thresholds (calls to ui_poll_joystick per event) */
-#define JOY_DELAY  20    /* frames before autorepeat starts */
-#define JOY_RATE    6    /* frames between autorepeat events */
+#define JOY_DELAY    20   /* autorepeat start (normal mode) */
+#define JOY_RATE      6   /* autorepeat rate  (normal mode) */
+#define EDIT_HOLD   180   /* polls to hold fire = ~1 second before edit mode */
+#define EDIT_REPEAT   8   /* autorepeat rate in edit mode */
+#define EDIT_TIMEOUT 30000  /* auto-exit after ~30 seconds of no joystick input */
+
+/* Global edit mode flag - also used by ui_draw_grid to dim labels */
+uint8_t g_edit_mode = 0;
+static uint8_t s_edit_row = 0;  /* 0=swing, 1=velocity */
+
+static void ui_draw_edit_overlay_sel(uint8_t sel)
+{
+    uint8_t val = g_pattern.steps[g_cur_track][g_cur_col];
+    uint8_t i;
+
+    /* Rows 14-17: replace help text with edit overlay */
+
+    /* Row 14: header */
+    sfill(14, 0, 40, 0x20, 0);
+    sputs(14, 0, "-- EDIT MODE --", CYL);
+    sputs(14, 17, "F7/FIRE:EXIT", CR);
+
+    /* Row 15: swing bar */
+    {
+        uint8_t filled = (uint8_t)(g_swing * 20 / 100);
+        uint8_t act = (sel == 0);
+        sfill(15, 0, 40, 0x20, 0);
+        sputs(15, 0, act ? ">>" : "  ", act ? CYL : CDG);
+        sputs(15, 3, "SW", act ? CW : CDG);
+        sput(15, 5, ':', CDG);
+        sput(15, 6, '[', CDG);
+        for (i = 0; i < 18; i++)
+            sput(15, (uint8_t)(7+i), i < filled ? 0x60 : 0x2E,
+                 i < filled ? (act ? CYL : CDG) : 11);
+        sput(15, 25, ']', CDG);
+        snum2(15, 27, g_swing, act ? CCY : CDG);
+        sputs(15, 30,
+              g_swing == 0  ? "STRT" :
+              g_swing < 30  ? "LITE" :
+              g_swing < 60  ? "CLSC" : "HEVY",
+              act ? CCY : CDG);
+        if (act) sputs(15, 36, "<>", CYL);
+    }
+
+    /* Row 16: velocity bar */
+    {
+        static const char * const vlbl[] = { "OFF ", "SOFT", "MED ", "LOUD" };
+        static const uint8_t vcol[] = { CDG, CCY, CYL, CW };
+        uint8_t filled = (uint8_t)(val * 6);
+        uint8_t act = (sel == 1);
+        sfill(16, 0, 40, 0x20, 0);
+        sputs(16, 0, act ? ">>" : "  ", act ? CYL : CDG);
+        sputs(16, 3, "VL", act ? CW : CDG);
+        sput(16, 5, ':', CDG);
+        sput(16, 6, '[', CDG);
+        for (i = 0; i < 18; i++)
+            sput(16, (uint8_t)(7+i), i < filled ? 0x60 : 0x2E,
+                 i < filled ? (act ? vcol[val] : CDG) : 11);
+        sput(16, 25, ']', CDG);
+        sput(16, 27, (uint8_t)('0'+val), act ? vcol[val] : CDG);
+        sput(16, 29, ' ', 0);
+        sputs(16, 30, vlbl[val], act ? vcol[val] : CDG);
+        if (act) sputs(16, 36, "<>", CYL);
+    }
+
+    /* Row 17: hint */
+    sfill(17, 0, 40, 0x20, 0);
+    sputs(17, 4, "UP/DN:SWITCH  LFT/RGT:ADJUST", CDG);
+
+    /* Clear rows 18-20 that may have old help text */
+    sfill(18, 0, 40, 0x20, 0);
+    sfill(19, 0, 40, 0x20, 0);
+    sfill(20, 0, 40, 0x20, 0);
+}
+
+static void ui_draw_edit_overlay(void)
+{
+    ui_draw_edit_overlay_sel(0);
+}
+
+
+static void ui_exit_edit(void)
+{
+    g_edit_mode = 0;
+    /* Restore separators and full help text */
+    sfill(11, 0, 40, 0x43, CDG);
+    sfill(13, 0, 40, 0x43, CDG);
+    ui_draw_full();   /* redraws everything including help rows */
+}
 
 void ui_poll_joystick(void)
 {
-    static uint8_t s_prev  = 0xFF;  /* previous raw state (all released) */
-    static uint8_t s_held  = 0;     /* current held direction (one bit) */
-    static uint8_t s_count = 0;     /* hold counter for autorepeat */
+    static uint8_t  s_prev        = 0xFF;
+    static uint8_t  s_held        = 0;
+    static uint8_t  s_count       = 0;
+    static uint8_t  s_fire_hold   = 0;
 
     uint8_t raw, pressed, key;
 
-    raw = JOY2 & 0x1F;          /* mask to 5 bits */
-    pressed = (~raw) & 0x1F;    /* active-high: 1 = pressed */
-
-    /* Detect newly pressed direction (ignore FIRE for autorepeat) */
-    key = 0;
-
-    if (pressed & JOY_UP)    key = 145;   /* CRSR UP    */
-    else if (pressed & JOY_DOWN)  key = 17;    /* CRSR DOWN  */
-    else if (pressed & JOY_LEFT)  key = 157;   /* CRSR LEFT  */
-    else if (pressed & JOY_RIGHT) key = 29;    /* CRSR RIGHT */
-
-    /* FIRE: only on new press, no autorepeat */
-    if ((pressed & JOY_FIRE) && !(s_prev & JOY_FIRE)) {
-        ui_handle_key(0x20);   /* space = toggle step */
+    /* ── F7 key toggle for edit mode ────────────────────────────────
+     * F7 = PETSCII 136. Function keys never auto-repeat on C64.
+     * We read directly from the KERNAL keyboard buffer at $0277.
+     * $C6 = number of keys in buffer. We scan for F7 and consume it.
+     * This works identically on real hardware and VICE.
+     */
+    {
+        uint8_t n   = *(volatile uint8_t *)0x00C6;
+        uint8_t i;
+        volatile uint8_t *buf = (volatile uint8_t *)0x0277;
+        for (i = 0; i < n; i++) {
+            if (buf[i] == 136) {       /* F7 = PETSCII 136 */
+                /* Remove this key from buffer by shifting remaining down */
+                uint8_t j;
+                for (j = i; j < n - 1; j++) buf[j] = buf[j+1];
+                *(volatile uint8_t *)0x00C6 = n - 1;
+                /* Toggle edit mode */
+                if (g_edit_mode) {
+                    ui_exit_edit();
+                } else {
+                    g_edit_mode  = 1;
+                    s_edit_row   = 0;
+                    s_fire_hold  = 0;
+                    s_held = 0; s_count = 0;
+                    s_prev = (~(JOY2 & 0x1F)) & 0x1F;
+                    ui_draw_edit_overlay_sel(s_edit_row);
+                }
+                break;
+            }
+        }
     }
+
+    raw     = JOY2 & 0x1F;
+    pressed = (~raw) & 0x1F;
+
+    /* ── EDIT MODE ──────────────────────────────────────────────── */
+    if (g_edit_mode) {
+        uint8_t changed = 0;
+
+        /* Fire: exit edit mode on a fresh press only */
+        if ((pressed & JOY_FIRE) && !(s_prev & JOY_FIRE)) {
+            s_prev = pressed;
+            ui_exit_edit();
+            s_fire_hold = 0;
+            return;
+        }
+
+        /* UP/DOWN: switch active row (swing vs velocity) */
+        /* LEFT/RIGHT: adjust active row's value */
+        key = 0;
+        if      (pressed & JOY_LEFT)  key = 1;   /* adjust down */
+        else if (pressed & JOY_RIGHT) key = 2;   /* adjust up   */
+        else if (pressed & JOY_UP)    key = 3;   /* switch row  */
+        else if (pressed & JOY_DOWN)  key = 4;   /* switch row  */
+
+        if (key) {
+            uint8_t act = 0;
+            if (key != s_held) {
+                s_held = key; s_count = 0; act = 1;
+            } else {
+                s_count++;
+                /* UP/DOWN: no autorepeat - only fire once per press */
+                if ((key == 3 || key == 4)) {
+                    act = 0;
+                } else if (s_count == JOY_DELAY ||
+                   (s_count > JOY_DELAY &&
+                    ((s_count - JOY_DELAY) % EDIT_REPEAT) == 0)) {
+                    act = 1;
+                }
+            }
+
+            if (act) {
+                if (key == 3 || key == 4) {
+                    /* UP/DOWN: toggle active row */
+                    s_edit_row ^= 1;
+                    changed = 1;
+                } else if (key == 1) {
+                    /* LEFT: decrease active value */
+                    if (s_edit_row == 0) {
+                        seq_set_swing(g_swing >= 4 ? (uint8_t)(g_swing-4) : 0);
+                        changed = 1;
+                    } else {
+                        uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+                        if (v > 0) { g_pattern.steps[g_cur_track][g_cur_col] = v-1; changed = 1; }
+                    }
+                } else if (key == 2) {
+                    /* RIGHT: increase active value */
+                    if (s_edit_row == 0) {
+                        seq_set_swing(g_swing <= 95 ? (uint8_t)(g_swing+4) : 99);
+                        changed = 1;
+                    } else {
+                        uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+                        if (v < 3) { g_pattern.steps[g_cur_track][g_cur_col] = v+1; changed = 1; }
+                    }
+                }
+                if (changed) {
+                    ui_draw_status();
+                    ui_draw_edit_overlay_sel(s_edit_row);
+                }
+            }
+        } else {
+            s_held = 0; s_count = 0;
+            /* No timeout - stay in edit mode until explicit exit */
+        }
+
+        s_prev = pressed;
+        return;
+    }
+
+    /* ── NORMAL MODE ────────────────────────────────────────────── */
+
+    /* Track fire hold duration */
+    if (pressed & JOY_FIRE) {
+        s_fire_hold++;
+
+        /* Show hold progress in status bar: fills a bar as you hold.
+         * Updates every 10 polls to avoid flickering. */
+        if ((s_fire_hold % 10) == 0) {
+            uint8_t progress = (uint8_t)(s_fire_hold * 8 / EDIT_HOLD);
+            uint8_t i;
+            sfill(24, 31, 9, 0x20, CLB);
+            sputs(24, 31, "HOLD:", CLB);
+            for (i = 0; i < 8; i++)
+                sput(24, (uint8_t)(36+i), i < progress ? 0x60 : 0x2E,
+                     i < progress ? CYL : CDG);
+        }
+
+        if (s_fire_hold >= EDIT_HOLD) {
+            /* Enter edit mode — restore status bar first */
+            sfill(24, 31, 9, 0x20, CLB);
+            g_edit_mode  = 1;
+            s_fire_hold  = 0;
+            s_held = 0; s_count = 0;
+            s_prev = pressed;
+            ui_draw_edit_overlay_sel(s_edit_row);
+            return;
+        }
+    } else {
+        /* Fire released - clear progress bar */
+        if (s_fire_hold > 0)
+            sfill(24, 31, 9, 0x20, CLB);
+
+        if (s_fire_hold > 0 && s_fire_hold < EDIT_HOLD) {
+            /* Short press: cycle velocity in place, never auto-advance */
+            uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+            if (v == 0)      g_pattern.steps[g_cur_track][g_cur_col] = 3;
+            else if (v == 3) g_pattern.steps[g_cur_track][g_cur_col] = 2;
+            else if (v == 2) g_pattern.steps[g_cur_track][g_cur_col] = 1;
+            else             g_pattern.steps[g_cur_track][g_cur_col] = 0;
+            ui_draw_grid();
+        }
+        s_fire_hold = 0;
+    }
+
+    /* Directions (normal mode: move cursor) */
+    key = 0;
+    if      (pressed & JOY_UP)    key = 145;
+    else if (pressed & JOY_DOWN)  key = 17;
+    else if (pressed & JOY_LEFT)  key = 157;
+    else if (pressed & JOY_RIGHT) key = 29;
 
     if (key) {
         if (key != s_held) {
-            /* New direction: act immediately, reset counter */
-            s_held  = key;
-            s_count = 0;
+            s_held = key; s_count = 0;
             ui_handle_key(key);
         } else {
-            /* Same direction held: autorepeat */
             s_count++;
             if (s_count == JOY_DELAY ||
-               (s_count > JOY_DELAY && ((s_count - JOY_DELAY) % JOY_RATE) == 0)) {
+               (s_count > JOY_DELAY && ((s_count-JOY_DELAY) % JOY_RATE) == 0))
                 ui_handle_key(key);
-            }
         }
     } else {
-        s_held  = 0;
-        s_count = 0;
+        s_held = 0; s_count = 0;
     }
 
     s_prev = pressed;
-}
-
-/* ── PETSCII conversion ──────────────────────────────────────────── */
-/*
- * The C64 has two character sets selectable via $D018 bit 1:
- *   bit 1 = 0: PETSCII graphics set  (uppercase A-Z = graphic symbols)
- *   bit 1 = 1: PETSCII text set      (uppercase A-Z shown as letters,
- *                                     lowercase a-z = small letters)
- *
- * We use the text set (bit 1 = 1). In this mode, screen codes map as:
- *   'A'-'Z' (65-90)  -> uppercase letters    (screen codes 65-90... NO)
- *
- * Actually screen codes are NOT the same as ASCII even in text mode.
- * The correct mapping for the C64 text charset (upper+lower):
- *   Screen code  1-26  = A-Z  (uppercase)
- *   Screen code 65-90  = a-z  (lowercase, displayed as small letters)
- *   BUT: $D018 bit1=1 swaps: code 65-90 shows UPPERCASE, 1-26 shows lowercase
- *
- * Simplest correct approach: write ASCII 'A'-'Z' and use the charset
- * where those codes display as uppercase. This is achieved by keeping
- * $D018 bit1=0 (default) and using PETSCII screen codes directly:
- *   To show 'A': write screen code 1  (PETSCII $01)
- *   To show 'a': write screen code 1  in the other set
- *
- * CORRECT SIMPLE RULE for default C64 charset ($D018 bit1=0):
- *   Uppercase A-Z: screen code = char - 64   (so 'A'=1, 'B'=2 ... 'Z'=26)
- *   Digits  0-9:  screen code = char - 48+48 = char  (PETSCII digits = ASCII)
- *   Space:        screen code = 32  (same)
- *   '.':          screen code = 46  (same)
- *   '-':          screen code = 45  (same)
- *   '*':          screen code = 42  (same)
- *   '|':          screen code = 93  (PETSCII pipe)
- *   '=':          screen code = 61  (same)
- *   '+':          screen code = 43  (same)
- *   '/':          screen code = 47  (same)
- *   '[':          screen code = 27
- *   ']':          screen code = 29... conflict with cursor right
- *
- * Use ']' screen code 93... actually let's just use a conversion function.
- *
- * ASCII_TO_SCREEN(c): converts ASCII to C64 screen code for uppercase mode.
- */
-static uint8_t a2s(uint8_t c)
-{
-    /* A-Z: screen codes 1-26 (subtract 64) */
-    if (c >= 'A' && c <= 'Z') return (uint8_t)(c - 64u);
-    /* a-z: also map to 1-26 (display as uppercase in default charset) */
-    if (c >= 'a' && c <= 'z') return (uint8_t)(c - 96u);
-    /* Special chars */
-    if (c == '|') return 0x5Du;   /* vertical bar PETSCII screen code */
-    if (c == '[') return 0x1Bu;
-    if (c == ']') return 0x1Du;
-    if (c == '@') return 0u;
-    /* Space, digits, punct (32-63): same in ASCII and screen codes */
-    return c;
-}
-
-/* Write a C string with ASCII->screen code conversion */
-static void sputs(uint8_t row, uint8_t col, const char *s, uint8_t color)
-{
-    while (*s && col < 40u)
-        sput(row, col++, a2s((uint8_t)*s++), color);
 }
 
 /* ── Screen clear ────────────────────────────────────────────────── */
@@ -243,10 +429,9 @@ void ui_draw_full(void)
 {
     uint8_t i, col, d;
 
-    /* Row 0: title - more prominent */
-    sfill(0, 0, 40, 0x20, 0);   /* black background */
-    sputs(0, 2, "** DRUMBOX 64 **", CW);
-    sfill(0, 20, 20, 0x20, 0);
+    /* Row 0: title centered */
+    sfill(0, 0, 40, 0x20, 0);
+    sputs(0, 6, "** DRUMBOX 64 BY SANDLBN **", CW);
 
     /* Row 3: step header - beat groups colored differently */
     sfill(3, 0, 40, 0x20, 0);
@@ -259,21 +444,11 @@ void ui_draw_full(void)
         sput(3, col, d, ((i & 3) == 0) ? CW : ((i & 1) == 0) ? CCY : CDG);
     }
 
-    /* Row 11: separator - double line feel */
-    sfill(11, 0, 40, 0x43, CDG);   /* 0x43 = horizontal line in PETSCII */
+    /* Row 11: separator */
+    sfill(11, 0, 40, 0x43, CDG);
 
-    /* Row 12: beat markers */
-    sfill(12, 0, 40, 0x20, 0);
-    sputs(12, 0, "BEAT:", CLB);
-    for (i = 0; i < NUM_STEPS; i++) {
-        col = (uint8_t)(GCOL + i * GSPC);
-        if ((i & 3) == 0)
-            sput(12, col, (uint8_t)('1' + (i >> 2)), CW);
-        else if ((i & 1) == 0)
-            sput(12, col, '+', CDG);
-        else
-            sput(12, col, '-', 11);  /* dark gray */
-    }
+    /* Row 12: parameter bar - drawn by ui_draw_param_bar() */
+    /* (called separately so it can update without full redraw) */
 
     /* Row 13: separator */
     sfill(13, 0, 40, 0x43, CDG);
@@ -286,8 +461,8 @@ void ui_draw_full(void)
     /* Row 15: movement + toggle */
     sfill(15, 0, 40, 0x20, 0);
     sputs(15,  0, "CRSR", CYL);  sputs(15,  4, ":MOVE  ", CDG);
-    sputs(15, 11, "SPC", CYL);   sputs(15, 14, ":TOGGLE ", CDG);
-    sputs(15, 23, "JOY", CCY);   sputs(15, 26, ":MOVE+FIRE", CDG);
+    sputs(15, 11, "SPC", CYL);   sputs(15, 14, ":VELOCITY ", CDG);
+    sputs(15, 25, "F7", CCY);    sputs(15, 27, ":EDIT MODE", CDG);
 
     /* Row 16: transport */
     sfill(16, 0, 40, 0x20, 0);
@@ -298,8 +473,9 @@ void ui_draw_full(void)
     /* Row 17: tempo + pattern */
     sfill(17, 0, 40, 0x20, 0);
     sputs(17,  0, "+/-", CYL); sputs(17,  3, ":TEMPO  ", CDG);
-    sputs(17, 11, "C", CYL);   sputs(17, 12, ":CLEAR  ", CDG);
-    sputs(17, 20, "R", CYL);   sputs(17, 21, ":RELOAD", CDG);
+    sputs(17, 11, "</>", CYL); sputs(17, 14, ":SWING  ", CDG);
+    sputs(17, 22, "C", CYL);   sputs(17, 23, ":CLR ", CDG);
+    sputs(17, 28, "R", CYL);   sputs(17, 29, ":RELOAD", CDG);
 
     /* Row 18: kits + quit */
     sfill(18, 0, 40, 0x20, 0);
@@ -337,23 +513,24 @@ void ui_draw_status(void)
     uint8_t nb[17];
     uint8_t i;
 
-    /* Row 1: kit / bpm / state / sid */
+    /* Row 1: kit / bpm / swing / state */
     sfill(1, 0, 40, 0x20, CLB);
     sputs(1,  0, "KIT:", CLB);
     sputs(1,  4, KLAB[g_kit], CCY);
     sputs(1,  8, "BPM:", CLB);
-    snum(1, 12, g_tempo, CCY);
-    sputs(1, 17, (g_seq_state == SEQ_PLAYING) ? "** PLAY **" : "- STOP -  ",
+    snum16(1, 12, g_tempo, CCY);
+    sputs(1, 16, "SW:", CLB);
+    snum2(1, 19, g_swing, (g_swing > 0) ? CCY : CDG);
+    sputs(1, 21, (g_seq_state == SEQ_PLAYING) ? "** PLAY **" : "- STOP -  ",
                   (g_seq_state == SEQ_PLAYING) ? CYL : CR);
-    /* SID2 status with address */
+    /* SID2 status */
     if (g_dual_sid) {
-        /* Show "SID2:DE00" using address label */
         static const char * const albl[] = {"DE00","DF00","D500","D420"};
-        sfill(1, 28, 12, 0x20, CDG);
-        sputs(1, 28, "SID2:", CCY);
-        sputs(1, 33, albl[g_sid2_idx], CCY);
+        sfill(1, 32, 8, 0x20, CDG);
+        sputs(1, 32, "S2:", CCY);
+        sputs(1, 35, albl[g_sid2_idx], CCY);
     } else {
-        sputs(1, 28, "SID2:OFF    ", CDG);
+        sputs(1, 32, "S2:OFF  ", CDG);
     }
 
     /* Row 2: preset */
@@ -378,63 +555,133 @@ void ui_draw_status(void)
     sputs(24, 31, "W:SAV L:LOD", CDG);
 }
 
+/* ── ui_draw_param_bar ───────────────────────────────────────────── */
+/*
+ * Row 12: context-sensitive parameter bar.
+ *
+ * If current step is OFF (0): shows swing as a horizontal bar.
+ *   SW [||||||||........] 54
+ *
+ * If current step is ON (1-3): shows step velocity as a bar.
+ *   VEL [|||.............] 2  SOFT / MED / LOUD
+ *   Fire cycles velocity. </> adjusts it.
+ */
+void ui_draw_param_bar(void)
+{
+    uint8_t val = g_pattern.steps[g_cur_track][g_cur_col];
+    uint8_t i;
+
+    sfill(12, 0, 40, 0x20, 0);
+
+    if (val == 0) {
+        /* Swing mode */
+        uint8_t filled = (uint8_t)(g_swing * 20 / 100);
+        sputs(12, 0, "SW", CYL);
+        sput(12, 2, ':', CDG);
+        sput(12, 3, '[', CDG);
+        for (i = 0; i < 20; i++)
+            sput(12, (uint8_t)(4 + i), i < filled ? 0x60 : 0x2E,
+                 i < filled ? CCY : 11);
+        sput(12, 24, ']', CDG);
+        snum2(12, 26, g_swing, (g_swing > 0) ? CCY : CDG);
+        sputs(12, 29, g_swing == 0 ? "STRAIGHT" :
+                      g_swing < 30 ? "LIGHT   " :
+                      g_swing < 60 ? "CLASSIC " : "HEAVY   ", CDG);
+    } else {
+        /* Velocity mode */
+        static const char * const vlbl[] = { "", "SOFT", "MED ", "LOUD" };
+        static const uint8_t vcol[] = { 0, CCY, CYL, CW };
+        uint8_t filled = (uint8_t)(val * 6);  /* 6, 12, 18 of 20 */
+        sputs(12, 0, "VL", CYL);
+        sput(12, 2, ':', CDG);
+        sput(12, 3, '[', CDG);
+        for (i = 0; i < 20; i++)
+            sput(12, (uint8_t)(4 + i), i < filled ? 0x60 : 0x2E,
+                 i < filled ? vcol[val] : 11);
+        sput(12, 24, ']', CDG);
+        sput(12, 26, (uint8_t)('0' + val), vcol[val]);
+        sput(12, 28, ' ', 0);
+        sputs(12, 29, vlbl[val], vcol[val]);
+        sputs(12, 34, "<>:ADJ", CDG);
+    }
+}
+
 /* ── ui_draw_grid ────────────────────────────────────────────────── */
 void ui_draw_grid(void)
 {
     uint8_t t, s, row, col, val, ch, co;
     uint8_t is_cur, is_play, is_beat1;
 
+    /* Velocity colors: off=dark, soft=cyan, medium=yellow, loud=white */
+    static const uint8_t VCOL[4] = { CDG, CCY, CYL, CW };
+    /* Velocity chars: off=dot, soft=asterisk, medium=O, loud=ball */
+    static const uint8_t VCH[4]  = { 0x2E, 0x2A, 0x4F, 0x51 };
+
     for (t = 0; t < NUM_TRACKS; t++) {
         row = (uint8_t)(GROW + t);
-
-        /* Track label: current=yellow, others=light blue */
         sputs(row, 0, TLAB[t], (t == g_cur_track) ? CYL : CLB);
         sput(row, 6, 0x5D, CDG);
 
         for (s = 0; s < NUM_STEPS; s++) {
             col     = (uint8_t)(GCOL + s * GSPC);
-            val     = g_pattern.steps[t][s];
-            is_cur  = (t == g_cur_track && s == g_cur_col)  ? 1 : 0;
+            val     = g_pattern.steps[t][s];   /* 0-3 */
+            is_cur  = (t == g_cur_track && s == g_cur_col) ? 1 : 0;
             is_play = (g_seq_state == SEQ_PLAYING && s == g_cur_step) ? 1 : 0;
-            is_beat1 = ((s & 3) == 0) ? 1 : 0;  /* beat downbeat */
+            is_beat1 = ((s & 3) == 0) ? 1 : 0;
 
             if (is_cur && is_play) {
-                /* Cursor AND playhead: orange */
-                ch = val ? 0x51 : 0x1B;
+                ch = val ? VCH[val] : 0x1B;
                 co = 8;   /* orange */
             } else if (is_cur) {
-                /* Cursor position: bright yellow bracket */
-                ch = val ? 0x51 : 0x1B;
+                ch = val ? VCH[val] : 0x1B;
                 co = CYL;
             } else if (is_play) {
-                /* Playhead: green for ON, red for OFF */
-                ch = val ? 0x51 : 0x2B;   /* 0x2B = '+' for empty playhead */
-                co = val ? 5 : 10;         /* 5=green, 10=light red */
-            } else if (val) {
-                /* Active step: bright on downbeat, normal elsewhere */
-                ch = 0x51;   /* filled circle */
-                co = is_beat1 ? CW : CYL;
+                ch = val ? VCH[val] : 0x2B;
+                co = val ? 5 : 10;   /* green / light red */
             } else {
-                /* Empty step: dim dot, slightly dimmer on off-beats */
-                ch = is_beat1 ? 0x2E : 0x2E;
-                co = is_beat1 ? CDG : 11;   /* CDG=dark gray, 11=slightly darker */
+                ch = val ? VCH[val] : 0x2E;
+                co = val ? VCOL[val] : (is_beat1 ? CDG : 11);
             }
             sput(row, col, ch, co);
-            sput(row, (uint8_t)(col + 1), 0x20, 0);  /* black gap */
+            sput(row, (uint8_t)(col + 1), 0x20, 0);
         }
     }
+    ui_draw_param_bar();
 }
 
 void ui_draw_playhead(uint8_t step)
 {
     (void)step;
     ui_draw_grid();
+    /* Edit overlay is rows 14-17, grid is rows 4-10. No conflict. */
 }
 
 /* ── ui_handle_key ───────────────────────────────────────────────── */
 void ui_handle_key(uint8_t key)
 {
     uint8_t t, s;
+
+    /* In edit mode: only allow exit (F7) and parameter keys.
+     * All other keys are ignored so the overlay stays stable. */
+    if (g_edit_mode) {
+        switch (key) {
+        case 136:  /* F7 - also handled in joystick poll, belt+suspenders */
+            ui_exit_edit(); break;
+        case '<': case ',': {
+            uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+            if (v > 0) { if (v > 1) g_pattern.steps[g_cur_track][g_cur_col] = v-1; }
+            else { seq_set_swing(g_swing >= 4 ? (uint8_t)(g_swing-4) : 0); ui_draw_status(); }
+            ui_draw_edit_overlay_sel(s_edit_row); break;
+        }
+        case '>': case '.': {
+            uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+            if (v > 0) { if (v < 3) g_pattern.steps[g_cur_track][g_cur_col] = v+1; }
+            else { seq_set_swing(g_swing <= 95 ? (uint8_t)(g_swing+4) : 99); ui_draw_status(); }
+            ui_draw_edit_overlay_sel(s_edit_row); break;
+        }
+        }
+        return;   /* ignore everything else */
+    }
 
     switch (key) {
 
@@ -454,9 +701,15 @@ void ui_handle_key(uint8_t key)
         g_cur_col = (g_cur_col > 0) ? g_cur_col - 1 : NUM_STEPS - 1;
         ui_draw_grid(); ui_draw_status(); break;
 
-    case 0x20: /* space: toggle + advance */
-        g_pattern.steps[g_cur_track][g_cur_col] ^= 1;
-        if (g_cur_col < NUM_STEPS - 1) g_cur_col++;
+    case 0x20: /* space: cycle velocity 0->3->0, never auto-advance */
+        {
+            uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+            /* 0 (off) -> 3 (loud) -> 2 (medium) -> 1 (soft) -> 0 (off) */
+            if (v == 0)       g_pattern.steps[g_cur_track][g_cur_col] = 3;
+            else if (v == 3)  g_pattern.steps[g_cur_track][g_cur_col] = 2;
+            else if (v == 2)  g_pattern.steps[g_cur_track][g_cur_col] = 1;
+            else              g_pattern.steps[g_cur_track][g_cur_col] = 0;
+        }
         ui_draw_grid(); break;
 
     case 'P': case 'p':
@@ -469,11 +722,24 @@ void ui_handle_key(uint8_t key)
         break;
 
     case '+': case '=':
-        if (g_tempo < 220) seq_set_tempo((uint8_t)(g_tempo + 2));
+        if (g_tempo < 280) seq_set_tempo((uint16_t)(g_tempo + 2));
         ui_draw_status(); break;
     case '-':
-        if (g_tempo > 40)  seq_set_tempo((uint8_t)(g_tempo - 2));
+        if (g_tempo > 40)  seq_set_tempo((uint16_t)(g_tempo - 2));
         ui_draw_status(); break;
+
+    case '<': case ',': {  /* decrease swing or velocity */
+        uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+        if (v > 0) { if (v > 1) g_pattern.steps[g_cur_track][g_cur_col] = v-1; }
+        else { seq_set_swing(g_swing >= 4 ? (uint8_t)(g_swing-4) : 0); ui_draw_status(); }
+        ui_draw_grid(); break;
+    }
+    case '>': case '.': {  /* increase swing or velocity */
+        uint8_t v = g_pattern.steps[g_cur_track][g_cur_col];
+        if (v > 0) { if (v < 3) g_pattern.steps[g_cur_track][g_cur_col] = v+1; }
+        else { seq_set_swing(g_swing <= 95 ? (uint8_t)(g_swing+4) : 99); ui_draw_status(); }
+        ui_draw_grid(); break;
+    }
 
     case 'N': case 'n':
         g_cur_preset = (g_cur_preset < (uint8_t)(g_num_presets - 1))

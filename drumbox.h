@@ -1,28 +1,12 @@
 /*
+
  * SID voice allocation:
  *   SID1 (0xD400): voices 0,1,2 -> kick, snare, hihat
  *   SID2 (0xD500 or 0xDE00): voices 0,1,2 -> tom, clap, crash
  *   If no second SID is found, voices 3-5 are muted / shared on SID1
  *
- * Sequencer timing:
- *   CIA2 Timer A fires an NMI at 240Hz. NMI vector at $0318.
- *   The ISR advances the step counter and triggers SID note-ons.
- *   Step length = 60 / (tempo * steps_per_beat) in seconds.
- *   On each IRQ tick, we decrement voice decay counters too.
- *
- * Kit styles:
- *   KIT_909: punchy, electronic, prominent kick and snare
- *   KIT_808: deep booming kick, longer decay, more "hip-hop" feel
- *   KIT_ROCK: slightly detuned, natural-feeling drums
- *
- * Limitations:
- *   - No sample playback (SID only)
- *   - SID envelope resolution is limited (4-bit)
- *   - Dual SID detection is best-effort (write/read test)
- *   - Tempo range ~60-200 BPM
- *   - 16 steps per pattern (expandable to 32 with minor changes)
- */
 
+ */
 #ifndef DRUMBOX_H
 #define DRUMBOX_H
 
@@ -54,8 +38,6 @@
 /* ── Sequencer constants ─────────────────────────────────────────── */
 #define NUM_STEPS       16
 #define NUM_TRACKS      7       /* kick snare chh ohh tom clap crash */
-#define MAX_PRESETS     30
-#define DEFAULT_TEMPO   120
 
 /* Track indices */
 #define TRK_KICK    0
@@ -65,6 +47,8 @@
 #define TRK_TOM     4
 #define TRK_CLAP    5
 #define TRK_CRASH   6
+#define MAX_PRESETS     36
+#define DEFAULT_TEMPO   120
 
 /* Kit styles */
 #define KIT_909     0
@@ -125,7 +109,8 @@ extern volatile uint8_t  g_cur_step;       /* 0..15, current play step */
 extern volatile uint8_t  g_seq_state;      /* SEQ_STOPPED / SEQ_PLAYING */
 extern volatile uint8_t  g_tick_flag;      /* set by ISR, cleared by main */
 
-extern uint8_t  g_tempo;                   /* current BPM */
+extern uint16_t g_tempo;                   /* current BPM */
+extern uint8_t  g_swing;                   /* swing 0=straight 54=classic 99=max */
 extern uint8_t  g_kit;                     /* current kit style */
 extern uint8_t  g_cur_preset;             /* index into preset table */
 extern uint8_t  g_cur_track;              /* cursor track row */
@@ -138,13 +123,16 @@ extern Pattern  g_pattern;                 /* working pattern (copy from preset)
 
 /* ── Voice sweep state (updated each IRQ tick) ──────────────────── */
 typedef struct {
-    uint8_t  sid;       /* 0=SID1, 1=SID2 */
-    uint8_t  voice;     /* 0-2 */
-    uint16_t freq;      /* current frequency */
-    uint16_t freq_end;  /* target frequency */
-    uint8_t  sweep;     /* sweep rate */
-    uint8_t  active;    /* 1 if voice is playing */
-    uint8_t  ttl;       /* ticks remaining (for gate-off) */
+    uint8_t  sid;        /* 0=SID1, 1=SID2 */
+    uint8_t  voice;      /* 0-2 */
+    uint16_t freq;       /* current frequency */
+    uint16_t freq_end;   /* target frequency */
+    uint8_t  sweep;      /* sweep rate */
+    uint8_t  active;     /* 1 if voice is playing */
+    uint8_t  ttl;        /* ticks remaining (for gate-off) */
+    uint8_t  wave2;      /* waveform to switch to (0=no switch) */
+    uint8_t  wave2_tick; /* tick at which to switch waveform */
+    uint16_t freq2;      /* frequency to set when switching to wave2 (0=keep) */
 } VoiceState;
 
 extern VoiceState g_voices[6];   /* 6 voices total across both SIDs */
@@ -156,7 +144,7 @@ void    sid_init(void);
 int     sid_detect_dual(void);
 void    sid_write(uint8_t sid, uint8_t reg, uint8_t val);
 uint8_t sid_read(uint8_t sid, uint8_t reg);
-void    sid_trigger(uint8_t track, uint8_t kit);
+void    sid_trigger(uint8_t track, uint8_t vel, uint8_t kit);
 void    sid_update_sweeps(void);
 void    sid_silence(void);
 void    sid_next_addr(void);     /* cycle SID2 address to next option */
@@ -169,18 +157,21 @@ void    seq_restore_irq(void);
 void    seq_poll(void);          /* call from main loop - does all sequencer work */
 void    seq_start(void);
 void    seq_stop(void);
-void    seq_set_tempo(uint8_t bpm);
+void    seq_set_tempo(uint16_t bpm);
+void    seq_set_swing(uint8_t pct);
 void    seq_tick(void);
 
 /* ui.c */
 void    ui_init(void);
 void    ui_draw_full(void);
 void    ui_draw_grid(void);
+void    ui_draw_param_bar(void);
 void    ui_draw_status(void);
 void    ui_draw_playhead(uint8_t step);
 void    ui_handle_key(uint8_t key);
 uint8_t ui_read_key(void);
 void    ui_poll_joystick(void);
+extern  uint8_t g_edit_mode;
 
 /* presets.c */
 void    preset_load(uint8_t index);
