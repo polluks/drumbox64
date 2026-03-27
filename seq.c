@@ -38,6 +38,7 @@
 volatile uint8_t g_cur_step   = 0;
 volatile uint8_t g_seq_state  = SEQ_STOPPED;
 volatile uint8_t g_tick_flag  = 0;
+static volatile uint8_t s_tick_pending = 0;  /* counts unprocessed CIA ticks */
 
 uint16_t g_tempo     = DEFAULT_TEMPO;
 uint8_t g_kit        = KIT_909;
@@ -121,35 +122,42 @@ void seq_poll(void)
     uint8_t track;
     uint8_t threshold;
 
+    /* Count this CIA tick if the flag is set.
+     * Reading ICR clears it, so we must count before it's lost. */
     icr = CIA2_ICR;
-    if (!(icr & 0x02)) return;
-
-    sid_update_sweeps();
-
-    if (g_seq_state != SEQ_PLAYING) return;
-
-    /*
-     * Swing: use s_tps_odd for odd-indexed steps (bit 0 = 1),
-     * s_tps_even for even-indexed steps (bit 0 = 0).
-     * g_cur_step is the LAST fired step, so the NEXT step
-     * is (g_cur_step + 1) & 15. We want the threshold for
-     * the step we're about to fire.
-     */
-    threshold = ((g_cur_step + 1) & 1) ? s_tps_even : s_tps_odd;
-
-    s_step_acc++;
-    if (s_step_acc < threshold) return;
-    s_step_acc = 0;
-
-    g_cur_step = (g_cur_step + 1) & (NUM_STEPS - 1);
-
-    for (track = 0; track < NUM_TRACKS; track++) {
-        uint8_t vel = g_pattern.steps[track][g_cur_step];
-        if (vel)
-            sid_trigger(track, vel, g_kit);
+    if (icr & 0x02) {
+        if (s_tick_pending < 8) s_tick_pending++;  /* cap at 8 - ~33ms max catchup */
     }
 
-    g_tick_flag = 1;
+    if (s_tick_pending == 0) return;
+
+    /* Drain ALL pending ticks so we never fall behind.
+     * If the main loop was slow and missed ticks, we catch up here.
+     * Each tick advances s_step_acc and may fire a step. */
+    while (s_tick_pending > 0) {
+        s_tick_pending--;
+
+        /* Sweep updates run once per real CIA tick */
+        sid_update_sweeps();
+
+        if (g_seq_state != SEQ_PLAYING) continue;
+
+        threshold = ((g_cur_step + 1) & 1) ? s_tps_even : s_tps_odd;
+
+        s_step_acc++;
+        if (s_step_acc < threshold) continue;
+        s_step_acc = 0;
+
+        g_cur_step = (g_cur_step + 1) & (NUM_STEPS - 1);
+
+        for (track = 0; track < NUM_TRACKS; track++) {
+            uint8_t vel = g_pattern.steps[track][g_cur_step];
+            if (vel)
+                sid_trigger(track, vel, g_kit);
+        }
+
+        g_tick_flag = 1;
+    }
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */

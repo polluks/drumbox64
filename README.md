@@ -1,6 +1,11 @@
 # DRUMBOX 64
 A 16-step drum machine for the Commodore 64.
 
+## Note
+
+This is an old project I started years ago and never finished.  
+Recently I dusted it off, fixed the issues, and brought it back to a working state.
+
 ## Features
 - 7 tracks: Kick, Snare, Closed Hat, Open Hat, Tom, Clap, Crash
 - 16 steps per track with 4 velocity levels (off / soft / medium / loud)
@@ -10,6 +15,12 @@ A 16-step drum machine for the Commodore 64.
 - Dual SID support (4 selectable addresses)
 - Save/load patterns to disk (10 slots)
 - Joystick support (port 2) with hold-fire edit mode
+
+## Screenshot
+
+![DRUMBOX 64 Screenshot](assets/screenshot.png)
+
+*DRUMBOX 64 running on Commodore 64*
 
 ## Build
 Requires the [Oscar64 compiler](https://github.com/drmortalwombat/oscar64).
